@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment files
+.env
+
+# Build and IDE
+.pytest_cache/
+.mypy_cache/
+.vscode/
+
+# Persisted runtime data
+storage/
+!storage/.gitkeep
+!storage/faiss_index/.gitkeep
+!storage/uploads/.gitkeep
