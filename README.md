@@ -14,6 +14,7 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
   - [Ingestion Pipeline](#ingestion-pipeline)
   - [Parent-Child Chunking](#parent-child-chunking)
   - [Retrieval Pipeline](#retrieval-pipeline)
+  - [Semantic Query Cache](#semantic-query-cache)
   - [LLM Tier System](#llm-tier-system)
   - [Query-Adaptive System](#query-adaptive-system)
 - [Project Structure](#project-structure)
@@ -33,7 +34,9 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
 - **HyDE query expansion** — Hypothetical Document Embedding improves semantic search quality
 - **Query-adaptive prompting** — Comprehensive queries ("full breakdown") get wider retrieval, structured markdown table output; lookup queries get concise precise answers
 - **Conversational memory** — Per-thread message history with multi-turn context
-- **Multi-thread chat** — Create, switch, and delete conversation threads per session
+- **Multi-thread chat** — Create, rename, switch, and delete conversation threads per session with full persistence
+- **Semantic query cache** — Persistent disk cache keyed by vector embeddings; paraphrases of the same question hit the cache instantly (0 LLM calls). Two-tier: exact SHA-256 match → cosine similarity fallback at threshold 0.80
+- **Response timing display** — Every answer shows its latency: ⚡ `Xms · from cache` or 🔄 `X.Xs` for fresh LLM responses
 - **Automatic LLM fallback** — Groq → Ollama (local) → raw chunk excerpts
 - **Faithfulness scoring** — Every answer is scored for groundedness against retrieved context
 - **Document summary index** — Per-document summaries built at ingest time, cached, used as a third retrieval lane
@@ -54,22 +57,35 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
                │  Ingest                           │  Query
                ▼                                   ▼
 ┌──────────────────────────┐       ┌───────────────────────────────────┐
-│    INGESTION PIPELINE    │       │         RETRIEVAL PIPELINE        │
-│                          │       │                                   │
-│  load_documents()        │       │  1. HyDE query expansion          │
-│       ↓                  │       │  2. FAISS child chunk search k=10 │
-│  chunk_documents_        │       │  3. BM25 keyword search      k=10 │
-│  hierarchical()          │       │  4. Summary vector search    k=3  │
-│       ↓                  │       │  5. RRF fusion            → top-12│
-│  Child chunks → FAISS    │       │  6. Cross-encoder reranking → top-5│
-│  Parent sections → disk  │       │  7. Parent section expansion      │
-│  Summary → LLM/cache     │       │  8. Deduplicate parents           │
-└──────────────────────────┘       └─────────────────┬─────────────────┘
+│    INGESTION PIPELINE    │       │       SEMANTIC QUERY CACHE        │
+│                          │       │  (indexing/query_cache.py)        │
+│  load_documents()        │       │                                   │
+│       ↓                  │       │  1. Exact SHA-256 key lookup      │
+│  chunk_documents_        │       │  2. Cosine similarity scan        │
+│  hierarchical()          │       │     (all-MiniLM-L6-v2, threshold  │
+│       ↓                  │       │      0.80) — catches paraphrases  │
+│  Child chunks → FAISS    │       │  HIT → return instantly (⚡ ~5ms) │
+│  Parent sections → disk  │       │  MISS → RETRIEVAL PIPELINE ↓     │
+│  Summary → LLM/cache     │       └───────────────┬───────────────────┘
+│       ↓                  │                       │ MISS
+│  clear_query_cache()     │       ┌───────────────▼───────────────────┐
+│  (new doc invalidates    │       │         RETRIEVAL PIPELINE        │
+│   answer cache)          │       │                                   │
+└──────────────────────────┘       │  1. HyDE query expansion          │
+                                   │  2. FAISS child chunk search k=10 │
+                                   │  3. BM25 keyword search      k=10 │
+                                   │  4. Summary vector search    k=3  │
+                                   │  5. RRF fusion            → top-12│
+                                   │  6. Cross-encoder reranking → top-5│
+                                   │  7. Parent section expansion      │
+                                   │  8. Deduplicate parents           │
+                                   └─────────────────┬─────────────────┘
                                                      │
                                                      ▼
                                    ┌───────────────────────────────────┐
                                    │           LLM TIER SYSTEM         │
                                    │                                   │
+                                   │  Tier 0: Cache HIT — 0 API calls │
                                    │  Tier 1: Groq — Llama 3.3 70B    │
                                    │       ↓ (rate limit / key error)  │
                                    │  Tier 2: Ollama (phi3.5 local)   │
@@ -173,6 +189,61 @@ User Question
 
 ---
 
+### Semantic Query Cache
+
+Every successfully generated answer is persisted to `storage/query_cache/{session_id}/cache.json`. The same question — or any paraphrase of it — returns instantly on subsequent asks with **zero LLM calls**.
+
+**Two-tier lookup on every query:**
+
+```
+Incoming question
+       │
+       ▼  Tier 1 — Exact match
+       │   SHA-256(normalized question) → O(1) dict lookup
+       │   HIT  → return in < 1ms  ⚡
+       │   MISS ↓
+       ▼  Tier 2 — Semantic similarity scan
+       │   Embed question with all-MiniLM-L6-v2 (same model as FAISS, already in memory)
+       │   Compute cosine similarity vs every stored question embedding
+       │   Best score ≥ 0.80 → HIT  ⚡  (paraphrase detected)
+       │   Best score <  0.80 → MISS → full RAG pipeline
+       ▼
+  Full pipeline → answer generated → save to cache
+```
+
+**What's stored per cache entry:**
+```json
+{
+  "abc123def456789012345678": {
+    "question": "What was my role in my internship?",
+    "embedding": [0.12, -0.34, 0.87, ...],
+    "answer": "Your role was MLOps Engineer Intern at Octakaigon Bock.",
+    "citations": [...],
+    "faithfulness": {"faithful": true, "confidence": 0.75, ...},
+    "cached_at": "2026-06-12T14:11:09Z"
+  }
+}
+```
+
+**Paraphrases caught by semantic matching (threshold 0.80):**
+
+| First ask (cached) | Later ask (HIT via similarity) |
+|---|---|
+| "What was my role in my internship?" | "Which position did I hold during my internship?" |
+| "What was my role in my internship?" | "Tell me my internship role" |
+| "What was my role in my internship?" | "What position did I have in my internship?" |
+
+**Automatic invalidation:**
+- **New document indexed** → `clear_session_cache()` wipes the session cache (new doc changes what's retrievable)
+- **Session deleted** → `storage/query_cache/{session_id}/` folder removed with it
+- **Eviction** — max 200 entries per session; oldest dropped automatically when exceeded
+
+**Response time display** — the UI shows a timing badge under every assistant message:
+- `⚡ 8ms · from cache` — served from disk, zero LLM calls
+- `🔄 3.21s` — fresh pipeline run, result now cached for future asks
+
+---
+
 ### LLM Tier System
 
 The system automatically falls through tiers without user intervention:
@@ -230,8 +301,9 @@ multi_doc_intelligence/
 │
 ├── chains/
 │   ├── llm_builder.py              # ChatGroq + ChatOllama factory with fallback
-│   ├── qa_chain.py                 # Main QA chain: retrieval → prompt → LLM
+│   ├── qa_chain.py                 # Main QA chain: cache check → retrieval → LLM
 │   │                               #   _classify_query_type(), _build_prompt()
+│   │                               #   ask_question() — two-tier cache + 3-tier LLM
 │   ├── hallucination.py            # Lexical faithfulness scoring (no LLM call)
 │   ├── summarize_chain.py          # Map-reduce document summarisation
 │   └── insight_chain.py            # Insight extraction chain
@@ -241,6 +313,9 @@ multi_doc_intelligence/
 │   ├── parent_store.py             # Parent section disk store
 │   │                               #   save_parents(), load_parent(), load_all_parents()
 │   ├── summary_index.py            # Per-document summary builder + cache
+│   ├── query_cache.py              # Semantic query-answer cache
+│   │                               #   make_cache_key(), get_cached_result()
+│   │                               #   save_cached_result(), clear_session_cache()
 │   └── llama_index_builder.py      # LlamaIndex FAISS wrapper (legacy)
 │
 ├── ingestion/
@@ -257,7 +332,7 @@ multi_doc_intelligence/
 │   └── multi_vector.py             # Summary vector search (cache-only at query time)
 │
 ├── ui/
-│   ├── chat_page.py                # Chat UI, thread management
+│   ├── chat_page.py                # Chat UI, thread management + naming + timing display
 │   ├── upload_page.py              # Upload UI, hierarchical ingest flow
 │   └── analysis_page.py            # Document analysis UI
 │
@@ -269,7 +344,8 @@ multi_doc_intelligence/
     ├── faiss_index/{session_id}/   # FAISS child chunk indexes
     ├── parents/{session_id}/       # Parent section JSON store
     ├── summary_index/{session_id}/ # Document summary cache
-    ├── threads/{session_id}/       # Conversation thread persistence
+    ├── threads/{session_id}/       # Conversation thread + name persistence
+    ├── query_cache/{session_id}/   # Semantic query-answer cache (cache.json)
     └── uploads/                    # Uploaded source files
 ```
 
@@ -386,16 +462,28 @@ Each document is deduplicated by SHA-256 hash — uploading the same file twice 
 
 ### 3 — Thread Management
 
+Each session can have multiple independent conversation threads — useful for exploring different topics within the same document set without mixing conversation history.
+
 - **New thread** — starts a fresh conversation (no history carried over)
-- **Switch thread** — select from the dropdown to resume a previous conversation
-- **Delete thread** — removes the thread and clears its memory
+- **Rename thread** — give each thread a meaningful name (e.g. "Compensation Questions", "Legal Clauses"); name is persisted to `storage/threads/{session_id}/threads.json`
+- **Switch thread** — select from the dropdown to resume a previous conversation; the dropdown shows thread names, not raw IDs
+- **Delete thread** — removes the thread and clears its LLM memory
+
+**Sessions vs Threads:**
+```
+Session "HR Policies"              ← document boundary (isolated FAISS index)
+├── Thread: "Leave Policy"         ← topic A conversation (own memory)
+├── Thread: "Appraisal Process"    ← topic B conversation (own memory)
+└── Thread: "Onboarding Steps"     ← topic C conversation (own memory)
+```
 
 ### 4 — Session Management
 
 - **New session** — creates a fresh isolated FAISS index
 - **Open session** — switch between previously indexed document sets
-- **Rename** — give the session a human-readable name
-- **Export** — download a ZIP containing the FAISS index, parent store, summaries, threads, and uploaded files
+- **Rename** — give the session a human-readable name (persisted to `doc_registry.json`)
+- **Export** — download a ZIP containing the FAISS index, parent store, summaries, threads, query cache, and uploaded files
+- **Delete** — removes all local storage for the session including the query cache
 
 ---
 
@@ -423,11 +511,18 @@ HyDE requires one LLM inference call before retrieval. For Groq this is ~0.5 sec
 
 Making a second LLM call per query just to score faithfulness doubles API usage. Lexical token overlap (words > 4 chars in common between answer and context) is a reasonable faithfulness proxy and runs in <1ms. The UI still shows the confidence score and a human-readable reason.
 
+### Why semantic vector caching instead of exact-match or fuzzy string matching?
+
+Exact-match (SHA-256 of question text) fails on any word change — "What was **the** role" vs "What was **my** role" are different keys despite being the same question. Fuzzy string matching (difflib) requires hand-tuned rules for which words are filler and which are semantic. Both approaches break in production.
+
+Vector embedding similarity solves this properly: both phrasings embed to nearly the same point in the 384-dimensional semantic space of all-MiniLM-L6-v2, giving a cosine similarity > 0.80. The same model is already loaded for FAISS, so the semantic cache adds zero new model weight to the process. Cosine similarity between genuinely different questions typically falls below 0.65, leaving a wide margin with no false positives.
+
 ### LLM call budget
 
 | Scenario | Calls per query |
 |----------|----------------|
-| Groq available | 1 (answer generation) |
+| Cache HIT (exact or semantic match) | **0** — instant from disk |
+| Groq available, cache MISS | 1 (answer generation) |
 | Groq rate-limited, Ollama available | 1 (Ollama answer) |
 | Both unavailable | 0 (raw chunks shown) |
 | Document upload (first time) | 1 (summary generation, cached) |
