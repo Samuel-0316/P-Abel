@@ -297,8 +297,7 @@ def _build_prompt(
             "- Present any financial, salary, or numeric data in markdown tables\n"
             "- Use bullet points for lists of items or benefits\n"
             "- Cover EVERY component mentioned in the context — do not skip any\n"
-            "- If a document says 'see Annexure-I' or 'details provided separately', "
-            "  explicitly note what is referenced but not in the retrieved text\n"
+            "- DO NOT include inline citations or source references (e.g. avoid saying 'According to Section 1' or '[Source 2]'). The UI handles citations automatically.\n"
             "- DO NOT say 'insufficient information' for partial data — instead share "
             "  everything that IS available and flag only specific missing values\n"
             "- Always include a summary table or bullet at the end"
@@ -307,7 +306,8 @@ def _build_prompt(
         system = (
             "You are a precise document assistant. "
             "Answer the question using only the retrieved context. "
-            "Be concise and cite which section of the document the answer comes from. "
+            "Be concise and direct. "
+            "DO NOT include inline citations or source references (e.g. avoid saying 'According to Section 1' or '[Source 2]'). The UI handles citations automatically. "
             "If the specific fact is genuinely absent from the context, say so briefly."
         )
 

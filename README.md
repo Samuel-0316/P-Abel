@@ -51,13 +51,20 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Streamlit UI (app.py)                        │
-│              Upload Page          │          Chat Page              │
-└──────────────┬────────────────────┴──────────────┬──────────────────┘
-               │  Ingest                           │  Query
-               ▼                                   ▼
-┌──────────────────────────┐       ┌───────────────────────────────────┐
-│    INGESTION PIPELINE    │       │       SEMANTIC QUERY CACHE        │
+│                       Vite + React UI (web/)                        │
+│               localhost:5173  (Production: served by FastAPI)       │
+└─────────────────────────────────┬───────────────────────────────────┘
+                                  │ REST API
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     FastAPI Server (api/server.py)                  │
+│               localhost:8000  (Wraps all backend logic)             │
+└───────┬─────────────────────────┬─────────────────────────┬─────────┘
+        │ Ingest                  │ Query                   │ Health
+        ▼                         ▼                         ▼
+┌───────────────────────┐  ┌─────────────────────────┐  ┌─────────────┐
+│   INGESTION PIPELINE  │  │   SEMANTIC QUERY CACHE  │  │ FAISS INDEX │
+│                       │  │                         │  │   MANAGER   │
 │                          │       │  (indexing/query_cache.py)        │
 │  load_documents()        │       │                                   │
 │       ↓                  │       │  1. Exact SHA-256 key lookup      │
@@ -92,6 +99,8 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
                                    │       ↓ (model unavailable)       │
                                    │  Tier 3: Raw chunk excerpts       │
                                    └───────────────────────────────────┘
+
+> **Note:** The legacy Streamlit UI (`app.py` on `localhost:8501`) is preserved as a direct-import fallback and bypasses FastAPI.
 ```
 
 ---
@@ -295,9 +304,18 @@ Prompt:    Precise mode — concise answer citing the source section
 ```
 multi_doc_intelligence/
 │
-├── app.py                          # Streamlit entry point, session management
+├── api/
+│   └── server.py                   # FastAPI REST API layer
+│
+├── web/
+│   ├── src/                        # React SPA frontend source
+│   ├── index.html                  # Vite entry point
+│   ├── package.json                # npm dependencies
+│   └── vite.config.js              # Vite dev server + API proxy config
+│
+├── app.py                          # Legacy Streamlit entry point
 ├── config.py                       # All constants, paths, env vars
-├── requirements.txt
+├── requirements.txt                # Python dependencies
 │
 ├── chains/
 │   ├── llm_builder.py              # ChatGroq + ChatOllama factory with fallback
@@ -371,8 +389,13 @@ python -m venv .venv
 .venv\Scripts\activate      # Windows
 # source .venv/bin/activate  # macOS/Linux
 
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Install Node.js dependencies for frontend
+cd web
+npm install
+cd ..
 ```
 
 ### Pull a local Ollama model (optional — offline fallback only)
@@ -403,10 +426,27 @@ Get a free Groq API key at [console.groq.com](https://console.groq.com) — no c
 
 ### Run
 
+The system now runs with a decoupled React frontend and FastAPI backend.
+
+**Terminal 1 — Start the Backend:**
+```bash
+# Ensure your virtual environment is activated
+uvicorn api.server:app --reload --port 8000
+```
+
+**Terminal 2 — Start the Frontend:**
+```bash
+cd web
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) in your browser to access the new React UI.
+
+*(Optional)* **Legacy Streamlit Fallback:**
+If you prefer the old UI, you can still run it directly (no FastAPI required):
 ```bash
 streamlit run app.py
 ```
-
 Open [http://localhost:8501](http://localhost:8501).
 
 ---

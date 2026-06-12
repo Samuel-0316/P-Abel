@@ -15,6 +15,10 @@ venv/
 .mypy_cache/
 .vscode/
 
+web/node_modules/
+web/.vite/
+web/.output/
+
 # Persisted runtime data
 storage/
 !storage/.gitkeep
