@@ -16,7 +16,7 @@ def check_faithfulness(answer: str, context: str, model_name: str | None = None)
 
     Uses a fast lexical overlap heuristic — no LLM call is made.
     This keeps per-query API usage at exactly 1 call (the answer generation),
-    which is critical for free-tier Gemini quota and CPU-only Ollama speed.
+    which is critical for free-tier Groq rate limits and CPU-only Ollama speed.
     """
     if not answer.strip() or not context.strip():
         return FaithfulnessResult(faithful=False, confidence=0.0, reason="Missing answer or context.")

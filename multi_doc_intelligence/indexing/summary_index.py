@@ -75,7 +75,7 @@ def _summarize_text(text: str, *, model_name: str | None = None) -> str:
         f"Document:\n{text}"
     )
     try:
-        llm = build_llm(model_name=model_name, provider="gemini", temperature=0)
+        llm = build_llm(model_name=model_name, provider="groq", temperature=0)
         response = llm.invoke(prompt)
         return response.content if hasattr(response, "content") else str(response)
     except Exception:

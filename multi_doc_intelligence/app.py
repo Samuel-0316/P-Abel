@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import streamlit as st
 
-from config import DOC_REGISTRY_PATH, GEMINI_MODEL, PATHS, ensure_storage_dirs
+from config import DOC_REGISTRY_PATH, PATHS, ensure_storage_dirs
 from ui.chat_page import render_chat_page
 from ui.upload_page import render_upload_page
 
@@ -240,7 +240,7 @@ def main() -> None:
     ensure_storage_dirs()
     st.set_page_config(page_title="Multi-Document Intelligence", page_icon="📚", layout="wide")
     st.title("Multi-Document Intelligence Dashboard")
-    st.caption("Cloud-based document intelligence with Google Gemini API and LCEL orchestration.")
+    st.caption("Cloud-based document intelligence with Groq API and LCEL orchestration.")
 
     if "session_id" not in st.session_state:
         sid_from_query = _normalize_session_id(st.query_params.get("sid"))
@@ -251,8 +251,6 @@ def main() -> None:
     if _normalize_session_id(st.query_params.get("sid")) != st.session_state.session_id:
         st.query_params["sid"] = st.session_state.session_id
 
-    if "selected_model" not in st.session_state:
-        st.session_state.selected_model = GEMINI_MODEL
 
     with st.sidebar:
         st.subheader("Session")
@@ -345,8 +343,6 @@ def main() -> None:
             else:
                 st.warning("Please enter a valid session name.")
 
-        st.text(f"Session ID: {st.session_state.session_id}")
-        st.text_input("Gemini Model", value=st.session_state.selected_model, key="selected_model")
         page = st.radio("Page", options=["Upload", "Chat"])
 
     if page == "Upload":
@@ -354,7 +350,7 @@ def main() -> None:
     else:
         render_chat_page(
             session_id=st.session_state.session_id,
-            model_name=st.session_state.selected_model,
+            model_name=None,
         )
 
 

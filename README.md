@@ -2,7 +2,7 @@
 
 A local-first, production-grade **Retrieval-Augmented Generation (RAG)** system for querying, summarising, and analysing PDF, DOCX, TXT, and Excel documents through a conversational chat interface.
 
-Built with **Google Gemini** as the primary LLM and **Ollama** (local models) as an automatic fallback — no cloud dependency required to run.
+Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local models) as an automatic fallback — the system gracefully degrades to raw chunk excerpts when no LLM is reachable.
 
 ---
 
@@ -34,9 +34,9 @@ Built with **Google Gemini** as the primary LLM and **Ollama** (local models) as
 - **Query-adaptive prompting** — Comprehensive queries ("full breakdown") get wider retrieval, structured markdown table output; lookup queries get concise precise answers
 - **Conversational memory** — Per-thread message history with multi-turn context
 - **Multi-thread chat** — Create, switch, and delete conversation threads per session
-- **Automatic LLM fallback** — Gemini → Ollama (local) → raw chunk excerpts
+- **Automatic LLM fallback** — Groq → Ollama (local) → raw chunk excerpts
 - **Faithfulness scoring** — Every answer is scored for groundedness against retrieved context
-- **Document summary index** — Per-document summaries built at ingest time, cached, used for retrieval
+- **Document summary index** — Per-document summaries built at ingest time, cached, used as a third retrieval lane
 - **Session management** — Export, import, rename, and delete sessions with full FAISS + thread persistence
 - **FAISS health checks** — Detect and repair corrupt or incomplete vector indexes
 
@@ -70,9 +70,9 @@ Built with **Google Gemini** as the primary LLM and **Ollama** (local models) as
                                    ┌───────────────────────────────────┐
                                    │           LLM TIER SYSTEM         │
                                    │                                   │
-                                   │  Tier 1: Google Gemini 2.0 Flash  │
-                                   │       ↓ (quota / key error)       │
-                                   │  Tier 2: Ollama (phi3.5 local)    │
+                                   │  Tier 1: Groq — Llama 3.3 70B    │
+                                   │       ↓ (rate limit / key error)  │
+                                   │  Tier 2: Ollama (phi3.5 local)   │
                                    │       ↓ (model unavailable)       │
                                    │  Tier 3: Raw chunk excerpts       │
                                    └───────────────────────────────────┘
@@ -90,7 +90,7 @@ When a document is uploaded:
    - **Child chunks** (~200 chars) — small precise units indexed into FAISS
 3. **Index children** — `indexing/vector_store.py` embeds child chunks using `sentence-transformers/all-MiniLM-L6-v2` and merges them into the session FAISS index
 4. **Save parents** — `indexing/parent_store.py` writes parent sections to `storage/parents/{session_id}/{doc_id}.json` keyed by `parent_index`
-5. **Build summary** — `indexing/summary_index.py` generates a document-level summary (via Gemini if available, otherwise extracts key sentences) and caches it to `storage/summary_index/{session_id}/{doc_id}.json`
+5. **Build summary** — `indexing/summary_index.py` generates a document-level summary via Groq (LLM-quality digest) and caches it to `storage/summary_index/{session_id}/{doc_id}.json`. Subsequent uploads of the same document skip this step (cache hit).
 
 Excel documents skip the parent-child split — each row group is already an atomic unit — and go through single-level chunking directly.
 
@@ -151,7 +151,7 @@ User Question
       │
       ▼ [4] Summary Vector Search  (cached doc summaries, k=3)
       │    Searches document-level summaries — helps surface the right
-      │    document when the query is high-level
+      │    document when the query is high-level ("what is this about?")
       │
       ▼ [5] RRF Fusion             (top-12 or top-18 candidates)
       │    Reciprocal Rank Fusion combines the three rankings without
@@ -179,12 +179,13 @@ The system automatically falls through tiers without user intervention:
 
 | Tier | Provider | Condition | HyDE |
 |------|----------|-----------|------|
-| 1 | Google Gemini 2.0 Flash | API key valid + quota available | ✅ Enabled |
-| 2 | Ollama (phi3.5 local) | Gemini unavailable | ❌ Skipped (CPU speed) |
+| 1 | Groq — Llama 3.3 70B Versatile | API key valid + within rate limits | ✅ Enabled |
+| 2 | Ollama (phi3.5 local) | Groq unavailable | ❌ Skipped (CPU speed) |
 | 3 | Raw chunk excerpts | Both LLMs unreachable | — |
 
 **Error classification** — raw API errors are translated to human-readable messages:
-- `429` → *"Gemini free-tier quota exceeded. Wait or enable billing."*
+- `429` → *"Groq free-tier rate limit hit. Wait a moment and retry."*
+- `401` → *"Groq API key is invalid. Check GROQ_API_KEY in .env."*
 - `404 model` → *"Ollama model not found. Run `ollama list`."*
 - `OOM` → *"Ollama model requires more RAM than available."*
 
@@ -228,7 +229,7 @@ multi_doc_intelligence/
 ├── requirements.txt
 │
 ├── chains/
-│   ├── llm_builder.py              # GeminiChatModel wrapper + Ollama factory
+│   ├── llm_builder.py              # ChatGroq + ChatOllama factory with fallback
 │   ├── qa_chain.py                 # Main QA chain: retrieval → prompt → LLM
 │   │                               #   _classify_query_type(), _build_prompt()
 │   ├── hallucination.py            # Lexical faithfulness scoring (no LLM call)
@@ -237,7 +238,7 @@ multi_doc_intelligence/
 │
 ├── indexing/
 │   ├── vector_store.py             # FAISS index manager (ingest, search, health)
-│   ├── parent_store.py             # Parent section disk store (NEW)
+│   ├── parent_store.py             # Parent section disk store
 │   │                               #   save_parents(), load_parent(), load_all_parents()
 │   ├── summary_index.py            # Per-document summary builder + cache
 │   └── llama_index_builder.py      # LlamaIndex FAISS wrapper (legacy)
@@ -250,7 +251,7 @@ multi_doc_intelligence/
 │   └── excel_parser.py             # Row-level Excel → Document converter
 │
 ├── retrieval/
-│   ├── hybrid_retriever.py         # 8-step retrieval pipeline (NEW architecture)
+│   ├── hybrid_retriever.py         # 8-step retrieval pipeline
 │   ├── reranker.py                 # RRF fusion + cross-encoder reranking
 │   ├── hyde.py                     # HyDE query expansion (skippable)
 │   └── multi_vector.py             # Summary vector search (cache-only at query time)
@@ -266,7 +267,7 @@ multi_doc_intelligence/
 │
 └── storage/                        # Runtime data (gitignored)
     ├── faiss_index/{session_id}/   # FAISS child chunk indexes
-    ├── parents/{session_id}/       # Parent section JSON store (NEW)
+    ├── parents/{session_id}/       # Parent section JSON store
     ├── summary_index/{session_id}/ # Document summary cache
     ├── threads/{session_id}/       # Conversation thread persistence
     └── uploads/                    # Uploaded source files
@@ -279,7 +280,8 @@ multi_doc_intelligence/
 ### Prerequisites
 
 - Python 3.10+
-- [Ollama](https://ollama.com) installed and running locally (for offline fallback)
+- A free [Groq API key](https://console.groq.com) (14,400 requests/day free)
+- [Ollama](https://ollama.com) installed and running locally (optional, for offline fallback)
 
 ### Install
 
@@ -297,7 +299,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Pull a local Ollama model
+### Pull a local Ollama model (optional — offline fallback only)
 
 ```bash
 # phi3.5 is the recommended fallback (2.2 GB, fits in 4 GB RAM)
@@ -316,12 +318,12 @@ copy .env.example .env
 Edit `.env`:
 
 ```env
-GOOGLE_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.0-flash
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
 DEFAULT_OLLAMA_MODEL=phi3.5:latest
 ```
 
-Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com/app/apikey).
+Get a free Groq API key at [console.groq.com](https://console.groq.com) — no credit card required, 14,400 requests/day on the free tier.
 
 ### Run
 
@@ -339,8 +341,8 @@ All tunable parameters live in `config.py` and can be overridden via `.env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GOOGLE_API_KEY` | — | Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model identifier |
+| `GROQ_API_KEY` | — | Groq API key (get one at console.groq.com) |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model identifier |
 | `DEFAULT_OLLAMA_MODEL` | `phi3.5:latest` | Local fallback model |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `EMBED_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
@@ -348,6 +350,14 @@ All tunable parameters live in `config.py` and can be overridden via `.env`:
 | `CHILD_CHUNK_SIZE` | `200` | Child chunk size in chars |
 | `MAX_CONTEXT_CHARS` | `6000` | LLM context budget (doubled for comprehensive queries) |
 | `USE_HYDE` | `true` | Enable HyDE query expansion (auto-disabled for Ollama) |
+
+**Available Groq models** (all free tier):
+
+| Model | Speed | Best for |
+|-------|-------|----------|
+| `llama-3.3-70b-versatile` | Fast | Best quality — recommended default |
+| `llama-3.1-8b-instant` | Very fast | High volume / quick lookups |
+| `mixtral-8x7b-32768` | Fast | Long context (32K) |
 
 ---
 
@@ -391,6 +401,10 @@ Each document is deduplicated by SHA-256 hash — uploading the same file twice 
 
 ## Design Decisions & Tradeoffs
 
+### Why Groq over other cloud LLM APIs?
+
+Groq runs on custom LPU (Language Processing Unit) hardware, delivering ~500 tokens/second — 10–20× faster than typical GPU-based APIs. The free tier offers 14,400 requests/day (6,000 RPM) with no credit card required. Llama 3.3 70B on Groq matches GPT-4 quality for document QA tasks at zero cost.
+
 ### Why parent-child chunking over single-level?
 
 Single-level chunking at any fixed size creates a dilemma: small chunks embed precisely but lack context; large chunks provide context but embed noisily. Parent-child solves this by using the right granularity for the right job — small for retrieval, large for generation.
@@ -403,20 +417,20 @@ FAISS returns L2 distances where lower = more similar. A score threshold is tric
 
 ### Why is HyDE disabled for Ollama?
 
-HyDE requires one LLM inference call before retrieval. For Gemini Flash this is ~1 second and cheap. For phi3.5 on a CPU-only laptop it's 10–30 seconds of extra wait before the actual answer generation begins. The raw question is a good enough retrieval signal for local model scenarios.
+HyDE requires one LLM inference call before retrieval. For Groq this is ~0.5 seconds and free. For phi3.5 on a CPU-only laptop it's 10–30 seconds of extra wait before the actual answer generation begins. The raw question is a good enough retrieval signal for local model scenarios.
 
 ### Why lexical faithfulness scoring instead of LLM-based?
 
-The previous implementation made a third LLM call per query just to score faithfulness — tripling API quota consumption. Lexical token overlap (words > 4 chars in common between answer and context) is a reasonable faithfulness proxy and runs in <1ms. The UI still shows the confidence score and a human-readable reason.
+Making a second LLM call per query just to score faithfulness doubles API usage. Lexical token overlap (words > 4 chars in common between answer and context) is a reasonable faithfulness proxy and runs in <1ms. The UI still shows the confidence score and a human-readable reason.
 
 ### LLM call budget
 
 | Scenario | Calls per query |
 |----------|----------------|
-| Gemini available | 1 (answer generation) |
-| Gemini quota hit, Ollama available | 1 (Ollama answer) |
+| Groq available | 1 (answer generation) |
+| Groq rate-limited, Ollama available | 1 (Ollama answer) |
 | Both unavailable | 0 (raw chunks shown) |
-| Document upload (first time) | 1 (summary generation, Gemini only, cached) |
+| Document upload (first time) | 1 (summary generation, cached) |
 
 ---
 
@@ -424,7 +438,8 @@ The previous implementation made a third LLM call per query just to score faithf
 
 - [LangChain](https://github.com/langchain-ai/langchain) — LCEL chains, FAISS integration, BM25
 - [sentence-transformers](https://github.com/UKPLab/sentence-transformers) — embeddings + cross-encoder
-- [Google Gemini](https://ai.google.dev) — primary LLM
-- [Ollama](https://ollama.com) — local model inference
+- [Groq](https://console.groq.com) — primary LLM (Llama 3.3 70B, free tier)
+- [Ollama](https://ollama.com) — local model inference fallback
 - [Streamlit](https://streamlit.io) — UI framework
 - [FAISS](https://github.com/facebookresearch/faiss) — vector similarity search
+- [Meta Llama](https://ai.meta.com/llama/) — underlying model weights (via Groq)

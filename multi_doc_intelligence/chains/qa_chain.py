@@ -11,6 +11,7 @@ from langchain_core.runnables import RunnableLambda
 from chains.llm_builder import build_llm
 from chains.hallucination import FaithfulnessResult, check_faithfulness
 from config import MAX_CONTEXT_CHARS
+from indexing.query_cache import get_cached_result, make_cache_key, save_cached_result
 from retrieval.hybrid_retriever import HybridRetriever
 
 logger = logging.getLogger(__name__)
@@ -20,15 +21,20 @@ def _classify_llm_error(exc: Exception, provider: str) -> str:
     """Return a concise, human-readable error string from a raw LLM exception."""
     msg = str(exc)
     low = msg.lower()
-    if provider == "gemini":
-        if "429" in msg or "quota" in low or "rate" in low:
+    if provider == "groq":
+        if "429" in msg or "quota" in low or "rate" in low or "rate_limit" in low:
             return (
-                "Gemini free-tier quota exceeded. "
-                "Wait a minute and retry, or enable billing at "
-                "https://ai.google.dev/gemini-api/docs/rate-limits"
+                "Groq free-tier rate limit hit. "
+                "Wait a moment and retry, or check limits at "
+                "https://console.groq.com/settings/limits"
             )
-        if "api_key" in low or "invalid" in low or "401" in msg:
-            return "Gemini API key is invalid or not authorised. Check your GOOGLE_API_KEY in .env."
+        if "api_key" in low or "invalid" in low or "401" in msg or "unauthorized" in low:
+            return "Groq API key is invalid or not authorised. Check your GROQ_API_KEY in .env."
+        if "model" in low and ("not found" in low or "404" in msg):
+            return (
+                "Groq model not found. "
+                "Check available models at https://console.groq.com/docs/models and update GROQ_MODEL in .env."
+            )
     if provider == "ollama":
         if "system memory" in low or "more memory" in low or "500" in msg:
             return (
@@ -51,6 +57,7 @@ class QAResult:
     hyde_query: str
     faithfulness: FaithfulnessResult
     error: str | None = None          # surfaced to UI when not None
+    from_cache: bool = False          # True when answer was served from disk cache
 
 
 def _format_context(docs: list, max_chars: int = MAX_CONTEXT_CHARS) -> str:
@@ -202,12 +209,12 @@ def _fallback_answer_from_context(question: str, docs: list) -> str:
     )
 
 
-def _invoke_gemini_chain(
+def _invoke_groq_chain(
     llm: Any,
     prompt: ChatPromptTemplate,
     inputs: dict,
 ) -> tuple[str, str | None]:
-    """Run the Gemini LCEL chain. Returns (answer_text, error_or_None)."""
+    """Run the Groq LCEL chain. Returns (answer_text, error_or_None)."""
     chain = (
         RunnableLambda(lambda data: data)
         | prompt
@@ -321,27 +328,50 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
     Conversational QA with per-thread memory and faithfulness scoring.
 
     LLM call budget per query:
-    - Tier 1 (Gemini available):  1 call  — HyDE + answer in same provider
-    - Tier 2 (Gemini quota hit):  1 call  — Ollama answer (HyDE skipped)
+    - Cache HIT:                  0 calls — instant response from disk
+    - Tier 1 (Groq available):    1 call  — HyDE + answer in same provider
+    - Tier 2 (Groq rate-limited): 1 call  — Ollama answer (HyDE skipped)
     - Tier 3 (both unavailable):  0 calls — raw chunk excerpts shown
 
-    HyDE is enabled for Gemini (fast, cheap) and disabled for Ollama
+    HyDE is enabled for Groq (fast, generous free tier) and disabled for Ollama
     (too slow on CPU-only hardware without GPU acceleration).
     """
-    error_msg: str | None = None
-    gemini_available = False
+    # --- Query cache check ---
+    # Memory context is part of the cache key so follow-up questions
+    # with different conversation history never get stale cached answers.
+    memory_snapshot = _memory_to_text(thread_id)
+    cache_key = make_cache_key(question, memory_snapshot)
+    cached = get_cached_result(session_id, cache_key, question=question)
+    if cached:
+        logger.info("Cache HIT for question: %.60s", question)
+        faithfulness_data = cached.get("faithfulness", {})
+        return QAResult(
+            answer=str(cached.get("answer", "")),
+            citations=cached.get("citations", []),
+            hyde_query=str(cached.get("hyde_query", "")),
+            faithfulness=FaithfulnessResult(
+                faithful=bool(faithfulness_data.get("faithful", False)),
+                confidence=float(faithfulness_data.get("confidence", 0.0)),
+                reason=str(faithfulness_data.get("reason", "Served from cache.")),
+            ),
+            error=None,
+            from_cache=True,
+        )
 
-    # --- Attempt Gemini build (validate key + model before retrieval) ---
+    error_msg: str | None = None
+    groq_available = False
+
+    # --- Attempt Groq build (validate key before retrieval) ---
     try:
-        llm = build_llm(model_name=model_name, provider="gemini", temperature=0)
-        gemini_available = True
+        llm = build_llm(model_name=model_name, provider="groq", temperature=0)
+        groq_available = True
     except RuntimeError as exc:
-        logger.warning("Gemini LLM unavailable: %s", exc)
+        logger.warning("Groq LLM unavailable: %s", exc)
         llm = None
-        error_msg = _classify_llm_error(exc, "gemini")
+        error_msg = _classify_llm_error(exc, "groq")
 
     # --- Retrieval ---
-    # HyDE is only used when Gemini is available (fast LLM).
+    # HyDE is only used when Groq is available (fast LLM).
     # With Ollama, skip HyDE to avoid a slow extra inference call.
     try:
         retriever_llm = llm or build_llm(model_name=None, provider="ollama", temperature=0)
@@ -357,7 +387,7 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
     retriever = HybridRetriever(
         session_id=session_id,
         llm=retriever_llm,  # type: ignore[arg-type]
-        use_hyde=gemini_available,
+        use_hyde=groq_available,
         # Wider net for comprehensive queries: more children retrieved,
         # more candidates after RRF, more parent sections to LLM.
         child_semantic_k=15 if is_comprehensive else 10,
@@ -367,7 +397,7 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
     )
     retrieved = retriever.retrieve(question)
 
-    history = _memory_to_text(thread_id)
+    history = memory_snapshot
     # Larger context budget for comprehensive queries
     ctx_budget = MAX_CONTEXT_CHARS * 2 if is_comprehensive else MAX_CONTEXT_CHARS
     context = _format_context(retrieved.documents, max_chars=ctx_budget)
@@ -382,17 +412,17 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
 
     answer = ""
 
-    # Tier 1: Gemini
+    # Tier 1: Groq
     if llm is not None:
         try:
-            answer, chain_err = _invoke_gemini_chain(llm, prompt, chain_inputs)
+            answer, chain_err = _invoke_groq_chain(llm, prompt, chain_inputs)
             if chain_err:
                 error_msg = (error_msg or "") + f" | {chain_err}"
         except Exception as exc:
-            logger.warning("Gemini chain failed: %s", exc)
-            error_msg = (error_msg or "") + f" | Gemini chain error: {_classify_llm_error(exc, 'gemini')}"
+            logger.warning("Groq chain failed: %s", exc)
+            error_msg = (error_msg or "") + f" | Groq chain error: {_classify_llm_error(exc, 'groq')}"
 
-    # Tier 2: Ollama (HyDE already skipped in retriever when gemini_available=False)
+    # Tier 2: Ollama (HyDE already skipped in retriever when groq_available=False)
     if not answer:
         answer, ollama_err = _invoke_ollama_chain(prompt, chain_inputs, model_name)
         if ollama_err:
@@ -407,10 +437,28 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
     _store_turn(thread_id, question, answer)
     faithfulness = check_faithfulness(answer=answer, context=context, model_name=model_name)
 
-    return QAResult(
+    result = QAResult(
         answer=answer,
         citations=_extract_citations(retrieved.documents),
         hyde_query=retrieved.hyde_query,
         faithfulness=faithfulness,
         error=error_msg,
     )
+
+    # --- Save to cache (only when the answer was genuinely generated, not a fallback) ---
+    if answer and not error_msg:
+        save_cached_result(
+            session_id=session_id,
+            cache_key=cache_key,
+            question=question,
+            answer=answer,
+            citations=result.citations,
+            hyde_query=result.hyde_query,
+            faithfulness={
+                "faithful": faithfulness.faithful,
+                "confidence": faithfulness.confidence,
+                "reason": faithfulness.reason,
+            },
+        )
+
+    return result

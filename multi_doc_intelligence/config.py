@@ -40,10 +40,10 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DEFAULT_OLLAMA_MODEL = os.getenv("DEFAULT_OLLAMA_MODEL", "phi3.5:latest")
 
 # ---------------------------------------------------------------------------
-# Google Gemini
+# Groq
 # ---------------------------------------------------------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # ---------------------------------------------------------------------------
 # Embedding
@@ -57,7 +57,7 @@ USE_HYDE = os.getenv("USE_HYDE", "true").lower() == "true"
 
 # Context budget for the LLM prompt.
 # Parent sections are ~1500 chars each; 4 parents = 6000 chars ≈ 1500 tokens.
-# Gemini Flash (1M ctx) and phi3.5 (4K ctx) both handle this comfortably.
+# Llama-3.3-70b (128K ctx) and phi3.5 (4K ctx) both handle this comfortably.
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
 
 

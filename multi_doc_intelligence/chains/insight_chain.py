@@ -77,7 +77,7 @@ def extract_insights(text: str, model_name: str | None = None) -> dict[str, Any]
     if not text.strip():
         return {"decisions": [], "action_items": [], "key_findings": []}
 
-    llm = build_llm(model_name=model_name, provider="gemini", temperature=0)
+    llm = build_llm(model_name=model_name, provider="groq", temperature=0)
     prompt = ChatPromptTemplate.from_template(
         "Extract structured insights from the document. Return only JSON with keys "
         "decisions, action_items, key_findings where each value is a list of strings. "
@@ -90,7 +90,7 @@ def extract_insights(text: str, model_name: str | None = None) -> dict[str, Any]
         if _is_quota_error(exc):
             fallback = _fallback_extract_insights(text)
             fallback["key_findings"] = [
-                "Insights generated using local fallback (Gemini quota limit reached)."
+                "Insights generated using local fallback (Groq rate limit reached)."
             ] + fallback["key_findings"]
             return fallback
         return {

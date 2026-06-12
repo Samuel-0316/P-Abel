@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ def _threads_file_path(session_id: str) -> Path:
     return _session_threads_dir(session_id) / "threads.json"
 
 
-def _qa_result_to_meta(result: QAResult) -> dict[str, Any]:
+def _qa_result_to_meta(result: QAResult, elapsed_ms: float = 0.0) -> dict[str, Any]:
     return {
         "citations": result.citations,
         "hyde_query": result.hyde_query,
@@ -29,6 +30,8 @@ def _qa_result_to_meta(result: QAResult) -> dict[str, Any]:
             "reason": result.faithfulness.reason,
         },
         "error": result.error,
+        "from_cache": result.from_cache,
+        "elapsed_ms": round(elapsed_ms, 1),
     }
 
 
@@ -46,19 +49,19 @@ def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _load_threads_from_disk(session_id: str) -> tuple[dict[str, list[dict[str, Any]]], str]:
+def _load_threads_from_disk(session_id: str) -> tuple[dict[str, list[dict[str, Any]]], str, dict[str, str]]:
     file_path = _threads_file_path(session_id)
     if not file_path.exists():
-        return {"thread-1": []}, "thread-1"
+        return {"thread-1": []}, "thread-1", {"thread-1": "Thread 1"}
 
     try:
         payload = json.loads(file_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"thread-1": []}, "thread-1"
+        return {"thread-1": []}, "thread-1", {"thread-1": "Thread 1"}
 
     raw_threads = payload.get("threads", {})
     if not isinstance(raw_threads, dict):
-        return {"thread-1": []}, "thread-1"
+        return {"thread-1": []}, "thread-1", {"thread-1": "Thread 1"}
 
     normalized_threads: dict[str, list[dict[str, Any]]] = {}
     for key, value in raw_threads.items():
@@ -75,7 +78,14 @@ def _load_threads_from_disk(session_id: str) -> tuple[dict[str, list[dict[str, A
     if active_thread not in normalized_threads:
         active_thread = next(iter(normalized_threads.keys()))
 
-    return normalized_threads, active_thread
+    # Load stored names; fall back to a friendly default for any missing key
+    raw_names = payload.get("thread_names", {})
+    thread_names: dict[str, str] = {}
+    for tid in normalized_threads:
+        stored = raw_names.get(tid, "").strip() if isinstance(raw_names, dict) else ""
+        thread_names[tid] = stored if stored else f"Thread {tid.split('-')[-1]}"
+
+    return normalized_threads, active_thread, thread_names
 
 
 def _save_threads_to_disk(session_id: str) -> None:
@@ -91,8 +101,11 @@ def _save_threads_to_disk(session_id: str) -> None:
             _normalize_message(item) for item in messages if isinstance(item, dict)
         ]
 
+    thread_names = st.session_state.get("thread_names", {})
+
     payload = {
         "active_thread": str(st.session_state.get("active_thread", "thread-1")),
+        "thread_names": {str(k): str(v) for k, v in thread_names.items()} if isinstance(thread_names, dict) else {},
         "threads": normalized_threads,
     }
 
@@ -103,9 +116,10 @@ def _save_threads_to_disk(session_id: str) -> None:
 
 def _ensure_chat_state(session_id: str) -> None:
     if "threads" not in st.session_state:
-        threads, active_thread = _load_threads_from_disk(session_id)
+        threads, active_thread, thread_names = _load_threads_from_disk(session_id)
         st.session_state.threads = threads
         st.session_state.active_thread = active_thread
+        st.session_state.thread_names = thread_names
 
         for thread_id, messages in threads.items():
             hydrate_thread_memory(thread_id, messages)
@@ -113,15 +127,23 @@ def _ensure_chat_state(session_id: str) -> None:
     if "active_thread" not in st.session_state:
         st.session_state.active_thread = "thread-1"
 
+    if "thread_names" not in st.session_state:
+        st.session_state.thread_names = {
+            tid: f"Thread {tid.split('-')[-1]}"
+            for tid in st.session_state.threads
+        }
+
 
 def _delete_or_reset_active_thread(session_id: str, thread_id: str) -> None:
     threads = st.session_state.threads
+    thread_names = st.session_state.get("thread_names", {})
     if len(threads) <= 1:
         threads[thread_id] = []
         st.session_state._next_active_thread = thread_id
         clear_thread_memory(thread_id)
     else:
         threads.pop(thread_id, None)
+        thread_names.pop(thread_id, None)
         clear_thread_memory(thread_id)
         st.session_state._next_active_thread = sorted(threads.keys())[0]
 
@@ -275,11 +297,35 @@ def _render_citations(result: QAResult | dict[str, Any]) -> None:
                 st.caption(f"Matched chunks: {hits}")
 
 
+def _render_timing_caption(meta: "QAResult | dict[str, Any]") -> None:
+    """Render a small timing badge under the answer."""
+    if isinstance(meta, dict):
+        elapsed_ms = float(meta.get("elapsed_ms", 0.0))
+        from_cache = bool(meta.get("from_cache", False))
+    else:
+        # Live QAResult object (just answered, not yet persisted)
+        elapsed_ms = float(getattr(meta, "_elapsed_ms", 0.0))
+        from_cache = bool(getattr(meta, "from_cache", False))
+
+    if elapsed_ms <= 0:
+        return
+
+    if from_cache:
+        label = f"⚡ {elapsed_ms:.0f} ms · from cache"
+    elif elapsed_ms < 1000:
+        label = f"🔄 {elapsed_ms:.0f} ms"
+    else:
+        label = f"🔄 {elapsed_ms / 1000:.2f} s"
+
+    st.caption(label)
+
+
 def _render_thread_messages(thread_id: str) -> None:
     for msg in st.session_state.threads.get(thread_id, []):
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
             if msg["role"] == "assistant" and "meta" in msg:
+                _render_timing_caption(msg["meta"])
                 _render_citations(msg["meta"])
 
 
@@ -295,17 +341,51 @@ def render_chat_page(session_id: str, model_name: str) -> None:
             st.session_state.active_thread = next_thread
 
     with st.sidebar:
-        st.markdown("### Thread Management")
-        selected = st.selectbox("Active thread", options=list(st.session_state.threads.keys()), key="active_thread")
-        if st.button("New thread"):
-            new_id = f"thread-{len(st.session_state.threads) + 1}"
-            st.session_state.threads[new_id] = []
-            st.session_state._next_active_thread = new_id
-            _save_threads_to_disk(session_id)
-            st.rerun()
-        if st.button("Delete active thread"):
-            _delete_or_reset_active_thread(session_id, selected)
-            st.rerun()
+        st.markdown("### Threads")
+
+        thread_names = st.session_state.get("thread_names", {})
+
+        selected = st.selectbox(
+            "Active thread",
+            options=list(st.session_state.threads.keys()),
+            format_func=lambda tid: thread_names.get(tid, tid),
+            key="active_thread",
+        )
+
+        col_new, col_del = st.columns(2)
+        with col_new:
+            if st.button("New thread", use_container_width=True):
+                new_id = f"thread-{len(st.session_state.threads) + 1}"
+                # Ensure unique ID
+                while new_id in st.session_state.threads:
+                    new_id = f"thread-{int(new_id.split('-')[-1]) + 1}"
+                st.session_state.threads[new_id] = []
+                thread_names[new_id] = f"Thread {new_id.split('-')[-1]}"
+                st.session_state._next_active_thread = new_id
+                _save_threads_to_disk(session_id)
+                st.rerun()
+        with col_del:
+            if st.button("Delete", use_container_width=True):
+                _delete_or_reset_active_thread(session_id, selected)
+                st.rerun()
+
+        st.markdown("#### Rename Thread")
+        current_thread_name = thread_names.get(selected, selected)
+        new_thread_name = st.text_input(
+            "Thread name",
+            value=current_thread_name,
+            key=f"rename_thread_input_{selected}",
+        )
+        if st.button("Save thread name", key="save_thread_name_btn", use_container_width=True):
+            clean = new_thread_name.strip()
+            if clean:
+                thread_names[selected] = clean
+                st.session_state.thread_names = thread_names
+                _save_threads_to_disk(session_id)
+                st.success("Thread name saved.")
+                st.rerun()
+            else:
+                st.warning("Please enter a valid thread name.")
 
     thread_id = selected
     _render_thread_messages(thread_id)
@@ -321,13 +401,17 @@ def render_chat_page(session_id: str, model_name: str) -> None:
 
     with st.chat_message("assistant"):
         with st.spinner("Retrieving evidence and generating grounded answer..."):
+            t_start = time.perf_counter()
             result = ask_question(
                 question=user_message,
                 thread_id=thread_id,
                 session_id=session_id,
                 model_name=model_name,
             )
+            elapsed_ms = (time.perf_counter() - t_start) * 1000
+        result_meta = _qa_result_to_meta(result, elapsed_ms)
         st.write(result.answer)
+        _render_timing_caption(result_meta)
         if result.error:
             st.warning(f"⚠️ LLM pipeline note: {result.error}", icon="⚠️")
         _render_citations(result)
@@ -336,7 +420,7 @@ def render_chat_page(session_id: str, model_name: str) -> None:
         {
             "role": "assistant",
             "content": result.answer,
-            "meta": _qa_result_to_meta(result),
+            "meta": result_meta,
         }
     )
     _save_threads_to_disk(session_id)

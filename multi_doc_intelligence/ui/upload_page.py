@@ -4,6 +4,7 @@ import streamlit as st
 
 from config import PATHS
 from indexing.parent_store import save_parents
+from indexing.query_cache import clear_session_cache
 from indexing.summary_index import build_summary_index
 from indexing.vector_store import VectorStoreManager
 from ingestion.chunker import chunk_documents, chunk_documents_hierarchical
@@ -120,6 +121,8 @@ def render_upload_page(session_id: str) -> None:
         else:
             parent_note = f" · {len(parents)} parent sections stored" if parents else ""
             st.success(f"{uploaded.name}: {result['chunk_count']} child chunks indexed{parent_note}")
+            # Invalidate query cache — new document changes what's retrievable
+            clear_session_cache(session_id)
 
         repair_action = str(result.get("repair_action", "none"))
         if repair_action != "none":

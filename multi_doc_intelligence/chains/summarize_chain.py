@@ -16,7 +16,7 @@ def _split_text(text: str, chunk_size: int = 3500) -> list[str]:
 
 
 def _build_llm(model_name: str | None = None):
-    return build_llm(model_name=model_name, provider="gemini", temperature=0)
+    return build_llm(model_name=model_name, provider="groq", temperature=0)
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -58,7 +58,7 @@ def _local_fallback_summary(text: str) -> str:
         return "\n".join(f"- {item}" for item in items)
 
     return (
-        "Summary generated using local fallback (Gemini quota limit reached).\n\n"
+        "Summary generated using local fallback (Groq rate limit reached).\n\n"
         "Overview\n"
         f"{_section_lines(overview)}\n\n"
         "Key Decisions\n"
