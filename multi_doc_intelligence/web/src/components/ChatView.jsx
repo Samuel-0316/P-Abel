@@ -1,11 +1,12 @@
 import { useState, useRef } from 'react';
 import ChatMessage from './ChatMessage';
 import { useChat } from '../hooks/useChat';
-import { AiIcon, AttachmentIcon, SendIcon, ChatIcon, SearchIcon, DocumentIcon } from './Icons';
+import { AiIcon, AttachmentIcon, SendIcon, ChatIcon, SearchIcon, DocumentIcon, ChevronDownIcon } from './Icons';
 
 export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThreadUpdate }) {
   const { messages, sending, error, send, bottomRef } = useChat(sessionId, threadId, onThreadUpdate);
   const [input, setInput] = useState('');
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const inputRef = useRef(null);
 
   const hasContent = messages.length > 0 || sending;
@@ -29,6 +30,17 @@ export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThrea
     setInput(e.target.value);
     e.target.style.height = '44px';
     e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+  };
+
+  const handleScroll = (e) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.target;
+    // Show button if we are scrolled up more than 100px from the bottom
+    const isScrolledUp = scrollHeight - scrollTop - clientHeight > 100;
+    setShowScrollButton(isScrolledUp);
+  };
+
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   // ── No session selected ──────────────────────────────────────────────────
@@ -71,7 +83,7 @@ export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThrea
 
       {/* Messages — only rendered when there's content */}
       {hasContent && (
-        <div className="chat-messages">
+        <div className="chat-messages" onScroll={handleScroll}>
           {messages.map((msg, i) => (
             <div key={i} className={`message-wrapper ${msg.role === 'user' ? 'message-user-wrapper' : ''}`}>
               <ChatMessage message={msg} />
@@ -84,12 +96,12 @@ export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThrea
                 <div className="message-avatar">
                   <AiIcon size={16} />
                 </div>
-                <div className="message-body">
-                  <div className="message-content" style={{ paddingTop: 8 }}>
-                    <div className="ai-pulse">
-                      <div className="ai-pulse-dot" />
-                      <div className="ai-pulse-dot" />
-                      <div className="ai-pulse-dot" />
+                <div className="message-body" style={{ flex: 1 }}>
+                  <div className="message-content">
+                    <div className="skeleton-wrapper">
+                      <div className="skeleton-line" />
+                      <div className="skeleton-line" />
+                      <div className="skeleton-line" />
                     </div>
                   </div>
                 </div>
@@ -97,12 +109,24 @@ export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThrea
             </div>
           )}
 
+
           <div ref={bottomRef} style={{ height: 1 }} />
         </div>
       )}
 
       {/* ── Floating Input — centered when empty, slides to bottom when active ── */}
       <div className={`chat-input-area ${hasContent ? 'is-bottom' : 'is-centered'}`}>
+
+        {/* Scroll to bottom button */}
+        {showScrollButton && (
+          <button 
+            className="scroll-to-bottom-btn" 
+            onClick={scrollToBottom}
+            title="Scroll to bottom"
+          >
+            <ChevronDownIcon size={20} />
+          </button>
+        )}
 
         {/* Welcome block — only shows when centered */}
         {!hasContent && (
@@ -136,12 +160,11 @@ export default function ChatView({ sessionId, threadId, onOpenKnowledge, onThrea
           <textarea
             ref={inputRef}
             className="chat-input"
-            placeholder="Ask a question…"
+            placeholder={sending ? "Draft next message..." : "Ask a question…"}
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
             rows={1}
-            disabled={sending}
           />
 
           <button

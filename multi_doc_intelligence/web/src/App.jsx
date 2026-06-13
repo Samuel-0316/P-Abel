@@ -22,6 +22,7 @@ export default function App() {
   } = useThreads(activeSession);
 
   const [showKnowledgeModal, setShowKnowledgeModal] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const handleCreateSession = async (name) => {
     const result = await createSession(name);
@@ -37,7 +38,7 @@ export default function App() {
   const activeSessionObj = sessions.find((s) => s.session_id === activeSession);
 
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <Sidebar
         theme={theme}
         onThemeToggle={toggleTheme}
@@ -53,6 +54,8 @@ export default function App() {
         onCreateThread={createThread}
         onRenameThread={renameThread}
         onDeleteThread={deleteThread}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
       />
 
       <main className="main-content">

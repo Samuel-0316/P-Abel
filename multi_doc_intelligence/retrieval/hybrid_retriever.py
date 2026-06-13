@@ -26,7 +26,7 @@ from indexing.parent_store import load_parent
 from indexing.vector_store import VectorStoreManager
 from retrieval.hyde import LLMProtocol, build_hyde_query
 from retrieval.multi_vector import build_multi_vector_config, collect_summary_vector_candidates
-from retrieval.reranker import rerank_with_cross_encoder, rrf_fuse
+from retrieval.reranker import rerank_with_cross_encoder, rerank_with_scores, rrf_fuse
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ class RetrievedContext:
     question: str
     hyde_query: str
     documents: list[Document]   # parent sections (or child fallbacks)
+    best_score: float = 1.0     # highest cross-encoder relevance score (0.0-1.0)
 
 
 class HybridRetriever:
@@ -137,7 +138,7 @@ class HybridRetriever:
 
         # Step 3: BM25 keyword search on child chunks
         bm25 = self._build_bm25_retriever()
-        bm25_docs = bm25.invoke(question) if bm25 is not None else []
+        bm25_docs = bm25.invoke(hyde_query) if bm25 is not None else []
 
         # Step 4: Summary vector search (cache-only, no LLM call)
         summary_docs: list[Document] = []
@@ -154,9 +155,16 @@ class HybridRetriever:
             top_n=self.rrf_top_n,
         )
 
-        # Step 6: Cross-encoder reranking → top-5 most relevant children
-        best_children = rerank_with_cross_encoder(
-            question, fused_children, top_n=self.rerank_top_n
+        # Step 6: Cross-encoder reranking with scores → top-5 most relevant children
+        scored_children = rerank_with_scores(
+            hyde_query, fused_children, top_n=self.rerank_top_n
+        )
+        best_score = scored_children[0][0] if scored_children else 0.0
+        best_children = [doc for _, doc in scored_children]
+
+        logger.info(
+            "Relevance gate: best cross-encoder score = %.4f for q='%.60s'",
+            best_score, question,
         )
 
         # Step 7+8: Expand each child to its parent section; deduplicate
@@ -166,4 +174,5 @@ class HybridRetriever:
             question=question,
             hyde_query=hyde_query,
             documents=final_docs,
+            best_score=best_score,
         )

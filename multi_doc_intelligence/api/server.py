@@ -375,14 +375,13 @@ def delete_thread(session_id: str, thread_id: str):
     threads = data.get("threads", {})
     names = data.get("thread_names", {})
 
-    if len(threads) <= 1:
-        # Reset the only thread instead of deleting
-        threads[thread_id] = []
-        clear_thread_memory(thread_id)
+    threads.pop(thread_id, None)
+    names.pop(thread_id, None)
+    clear_thread_memory(thread_id)
+    
+    if len(threads) == 0:
+        data["active_thread"] = ""
     else:
-        threads.pop(thread_id, None)
-        names.pop(thread_id, None)
-        clear_thread_memory(thread_id)
         data["active_thread"] = sorted(threads.keys())[0]
 
     _save_threads(session_id, data)

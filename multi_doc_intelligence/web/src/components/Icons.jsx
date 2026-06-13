@@ -167,3 +167,22 @@ export const MoonIcon = (p) => (
     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
   </Icon>
 );
+
+// Hamburger Menu (sidebar open)
+export const MenuIcon = (p) => (
+  <Icon {...p}>
+    <line x1="3" y1="6" x2="21" y2="6"/>
+    <line x1="3" y1="12" x2="21" y2="12"/>
+    <line x1="3" y1="18" x2="21" y2="18"/>
+  </Icon>
+);
+
+// Panel left close (sidebar collapse)
+export const SidebarCloseIcon = (p) => (
+  <Icon {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2"/>
+    <path d="M9 3v18"/>
+    <path d="M14 9l-3 3 3 3"/>
+  </Icon>
+);
+

@@ -41,10 +41,11 @@ MAX_CACHE_ENTRIES = 200
 
 # Cosine similarity threshold for semantic matching.
 # all-MiniLM-L6-v2 produces cosine similarities of ~0.82-0.88 for paraphrases
-# with different word choices (e.g. "role" vs "position", "what was" vs "tell me").
+# with different word choices (e.g. "role" vs "position", "what was" vs "tell me"),
+# ~0.75-0.82 for synonym-heavy rewrites (e.g. "student" vs "candidate").
 # Different-topic questions typically score below 0.65 on this model.
-# 0.80 is the correct operating point — catches paraphrases, rejects topic changes.
-SEMANTIC_THRESHOLD = 0.80
+# 0.75 catches synonym rewrites while safely rejecting cross-topic questions.
+SEMANTIC_THRESHOLD = 0.75
 
 
 # ---------------------------------------------------------------------------

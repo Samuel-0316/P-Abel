@@ -292,6 +292,13 @@ def _build_prompt(
             "You are a thorough document intelligence assistant. "
             "Your job is to synthesize ALL relevant information from the retrieved context "
             "into a complete, well-structured answer.\n\n"
+            "STRICT GROUNDING RULES:\n"
+            "- You MUST answer ONLY from the retrieved context below. NEVER use your own knowledge.\n"
+            "- If the question is about a topic NOT covered in the retrieved context (e.g. general knowledge, "
+            "  current events, trivia, or anything unrelated to the documents), respond EXACTLY with:\n"
+            '  "I can only answer questions about the documents in this project. '
+            'This question is outside the scope of the uploaded documents."\n'
+            "- Do NOT attempt to answer, speculate, or provide partial general-knowledge answers.\n\n"
             "FORMATTING RULES:\n"
             "- Use ## section headers to organise the response\n"
             "- Present any financial, salary, or numeric data in markdown tables\n"
@@ -299,16 +306,25 @@ def _build_prompt(
             "- Cover EVERY component mentioned in the context — do not skip any\n"
             "- DO NOT include inline citations or source references (e.g. avoid saying 'According to Section 1' or '[Source 2]'). The UI handles citations automatically.\n"
             "- DO NOT say 'insufficient information' for partial data — instead share "
-            "  everything that IS available and flag only specific missing values\n"
-            "- Always include a summary table or bullet at the end"
+            "  everything that IS available and flag only specific missing values"
         )
     else:
         system = (
             "You are a precise document assistant. "
-            "Answer the question using only the retrieved context. "
-            "Be concise and direct. "
-            "DO NOT include inline citations or source references (e.g. avoid saying 'According to Section 1' or '[Source 2]'). The UI handles citations automatically. "
-            "If the specific fact is genuinely absent from the context, say so briefly."
+            "Answer the question using ONLY the retrieved context below.\n\n"
+            "STRICT GROUNDING RULES:\n"
+            "- NEVER use your own knowledge, training data, or general knowledge to answer.\n"
+            "- If the question asks about something NOT present in the retrieved context "
+            "(e.g. general knowledge, current events, opinions, or topics unrelated to the documents), "
+            "respond EXACTLY with:\n"
+            '  "I can only answer questions about the documents in this project. '
+            'This question is outside the scope of the uploaded documents."\n'
+            "- Do NOT attempt to answer, speculate, or say 'not mentioned in the context' while still "
+            "  providing general knowledge. Simply refuse.\n"
+            "- If the specific fact IS about the documents but genuinely absent from the retrieved context, "
+            "  say so briefly.\n"
+            "- Be concise and direct.\n"
+            "- DO NOT include inline citations or source references. The UI handles citations automatically."
         )
 
     return ChatPromptTemplate.from_template(
@@ -397,6 +413,36 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
     )
     retrieved = retriever.retrieve(question)
 
+    # ── Relevance gate: short-circuit off-topic questions ──
+    # Cross-encoder scores (ms-marco-MiniLM-L-6-v2 logits):
+    # - Direct exact-match QA pairs: > +5.0
+    # - Highly instructional/complex prompts on-topic: approx -8.0 to -6.0
+    # - Completely off-topic queries (e.g. "Who is the PM?"): approx -11.0
+    # We use a threshold of -9.0 to safely allow noisy instructional prompts 
+    # to pass, while still rejecting totally unrelated queries.
+    RELEVANCE_THRESHOLD = -9.0
+    if retrieved.best_score < RELEVANCE_THRESHOLD:
+        logger.info(
+            "Relevance gate BLOCKED (score=%.4f < %.2f): '%.60s'",
+            retrieved.best_score, RELEVANCE_THRESHOLD, question,
+        )
+        refusal = (
+            "I can only answer questions about the documents in this project. "
+            "This question is outside the scope of the uploaded documents."
+        )
+        _store_turn(thread_id, question, refusal)
+        return QAResult(
+            answer=refusal,
+            citations=[],
+            hyde_query=retrieved.hyde_query,
+            faithfulness=FaithfulnessResult(
+                faithful=True,
+                confidence=1.0,
+                reason="Question is outside the scope of the uploaded documents. No evidence needed.",
+            ),
+            error=None,
+        )
+
     history = memory_snapshot
     # Larger context budget for comprehensive queries
     ctx_budget = MAX_CONTEXT_CHARS * 2 if is_comprehensive else MAX_CONTEXT_CHARS
@@ -435,11 +481,32 @@ def ask_question(question: str, thread_id: str, session_id: str, model_name: str
         answer = _fallback_answer_from_context(question, retrieved.documents)
 
     _store_turn(thread_id, question, answer)
-    faithfulness = check_faithfulness(answer=answer, context=context, model_name=model_name)
+
+    # Detect out-of-scope refusal — suppress citations and faithfulness
+    _REFUSAL_MARKERS = [
+        "outside the scope",
+        "can only answer questions about the documents",
+        "not mentioned in the context",
+        "not covered in the",
+        "is not present in the",
+    ]
+    is_refusal = any(marker in answer.lower() for marker in _REFUSAL_MARKERS)
+
+    if is_refusal:
+        # No citations — the retrieved docs are irrelevant noise for off-topic questions
+        citations = []
+        faithfulness = FaithfulnessResult(
+            faithful=True,
+            confidence=1.0,
+            reason="Question is outside the scope of the uploaded documents. No evidence needed.",
+        )
+    else:
+        citations = _extract_citations(retrieved.documents)
+        faithfulness = check_faithfulness(answer=answer, context=context, model_name=model_name)
 
     result = QAResult(
         answer=answer,
-        citations=_extract_citations(retrieved.documents),
+        citations=citations,
         hyde_query=retrieved.hyde_query,
         faithfulness=faithfulness,
         error=error_msg,

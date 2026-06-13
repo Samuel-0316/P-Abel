@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import ThemeToggle from './ThemeToggle';
-import { FolderIcon, ChatIcon, EditIcon, TrashIcon, CheckIcon, XIcon, WarningIcon, DotsIcon } from './Icons';
+import { FolderIcon, ChatIcon, EditIcon, TrashIcon, CheckIcon, XIcon, WarningIcon, DotsIcon, SidebarCloseIcon } from './Icons';
 
 /**
  * Sidebar — Projects (Sessions) with nested Chats (Threads).
- * Context menus appear on hover (⋯) — rename, export, delete.
+ * Collapsible: slides off-screen when collapsed, hamburger in header re-opens.
  */
 export default function Sidebar({
   theme, onThemeToggle,
@@ -12,8 +12,9 @@ export default function Sidebar({
   onRenameSession, onDeleteSession,
   threads, activeThread, onSelectThread,
   onCreateThread, onRenameThread, onDeleteThread,
+  collapsed, onToggleCollapse,
 }) {
-  const [menuOpen, setMenuOpen] = useState(null); // 'project-<id>' or 'chat-<id>'
+  const [menuOpen, setMenuOpen] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -68,18 +69,14 @@ export default function Sidebar({
   };
 
   const handleDelete = (type, id) => {
-    if (confirmDelete === `${type}-${id}`) {
-      if (type === 'project') onDeleteSession(id);
-      else onDeleteThread(id);
-      setConfirmDelete(null);
-      setMenuOpen(null);
-    } else {
-      setConfirmDelete(`${type}-${id}`);
-    }
+    if (type === 'project') onDeleteSession(id);
+    else onDeleteThread(id);
+    setConfirmDelete(null);
+    setMenuOpen(null);
   };
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
       {/* Header */}
       <div className="sidebar-header">
         <div className="sidebar-logo">
@@ -90,7 +87,16 @@ export default function Sidebar({
           </div>
           <div className="sidebar-logo-text">Multi-Doc</div>
         </div>
-        <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+        <div className="sidebar-header-controls">
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+          <button
+            className="btn-icon sidebar-collapse-btn"
+            onClick={onToggleCollapse}
+            title={collapsed ? 'Open sidebar' : 'Close sidebar'}
+          >
+            <SidebarCloseIcon size={18} />
+          </button>
+        </div>
       </div>
 
       {/* New Project Button / Input */}
@@ -187,7 +193,7 @@ export default function Sidebar({
                             className="ctx-item ctx-item-danger"
                             onClick={(e) => { e.stopPropagation(); handleDelete('project', s.session_id); }}
                           >
-                            {confirmDelete === `project-${s.session_id}` ? <><WarningIcon /> Confirm?</> : <><TrashIcon /> Delete</>}
+                            <TrashIcon /> Delete
                           </button>
                         </div>
                       )}
@@ -196,8 +202,8 @@ export default function Sidebar({
                 )}
 
                 {/* Nested Chats */}
-                {isActive && (
-                  <div style={{ paddingLeft: 20, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {isActive && !collapsed && (
+                  <div className="sidebar-chats-nested" style={{ paddingLeft: 20, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px 2px' }}>
                       <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Chats</span>
                       <button
@@ -265,7 +271,7 @@ export default function Sidebar({
                                   className="ctx-item ctx-item-danger"
                                   onClick={(e) => { e.stopPropagation(); handleDelete('chat', t.thread_id); }}
                                 >
-                                  {confirmDelete === `chat-${t.thread_id}` ? <><WarningIcon /> Confirm?</> : <><TrashIcon /> Delete</>}
+                                  <TrashIcon /> Delete
                                 </button>
                               </div>
                             )}

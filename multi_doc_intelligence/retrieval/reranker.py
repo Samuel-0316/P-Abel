@@ -97,3 +97,34 @@ def rerank_with_cross_encoder(
     except Exception as exc:
         logger.warning("Cross-encoder scoring failed (%s), falling back to RRF order.", exc)
         return docs[:top_n]
+
+
+def rerank_with_scores(
+    query: str,
+    docs: list[Document],
+    top_n: int = 5,
+) -> list[tuple[float, Document]]:
+    """
+    Like rerank_with_cross_encoder but also returns the cross-encoder scores.
+
+    Returns a list of (score, Document) tuples sorted descending by score.
+    The score indicates how relevant the document is to the query —
+    used by the relevance gate to detect off-topic questions.
+    """
+    if not docs:
+        return []
+
+    ce = _get_cross_encoder()
+    if ce is None:
+        # No cross-encoder — return with fake scores (high enough to pass any gate)
+        return [(1.0, doc) for doc in docs[:top_n]]
+
+    try:
+        pairs = [(query, doc.page_content) for doc in docs]
+        scores = ce.predict(pairs)
+        scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        return [(float(s), d) for s, d in scored[:top_n]]
+    except Exception as exc:
+        logger.warning("Cross-encoder scoring failed (%s), falling back to RRF order.", exc)
+        return [(1.0, doc) for doc in docs[:top_n]]
+
