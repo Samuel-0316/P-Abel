@@ -30,9 +30,11 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
 - **Multi-document sessions** — Upload multiple files per session; each session has its own isolated FAISS index
 - **Parent-Child RAG** — Retrieve with precision (small chunks), generate with context (full sections)
 - **Hybrid retrieval** — FAISS semantic search + BM25 keyword search + summary vectors, fused with Reciprocal Rank Fusion (RRF)
-- **Cross-encoder reranking** — `ms-marco-MiniLM-L-6-v2` scores query-chunk pairs for precision after RRF
-- **HyDE query expansion** — Hypothetical Document Embedding improves semantic search quality
+- **Cross-encoder reranking** — `ms-marco-MiniLM-L-6-v2` scores expanded-query-chunk pairs for precision after RRF
+- **Relevance Gate** — Short-circuits off-topic queries (score < `-9.0`) instantly, saving expensive LLM calls
+- **HyDE query expansion (v2)** — Uses an LLM to rewrite user questions into highly optimized search keywords, expanding abbreviations and dropping conversational filler. The expanded query feeds *both* FAISS and BM25.
 - **Query-adaptive prompting** — Comprehensive queries ("full breakdown") get wider retrieval, structured markdown table output; lookup queries get concise precise answers
+- **Modern Gemini-Style UI** — Collapsible icon-rail sidebar, continuous input drafting, auto-scroll to bottom, and glassmorphism styling
 - **Conversational memory** — Per-thread message history with multi-turn context
 - **Multi-thread chat** — Create, rename, switch, and delete conversation threads per session with full persistence
 - **Semantic query cache** — Persistent disk cache keyed by vector embeddings; paraphrases of the same question hit the cache instantly (0 LLM calls). Two-tier: exact SHA-256 match → cosine similarity fallback at threshold 0.80
@@ -78,12 +80,13 @@ Built with **Groq API** (Llama 3.3 70B) as the primary LLM and **Ollama** (local
 │  clear_query_cache()     │       ┌───────────────▼───────────────────┐
 │  (new doc invalidates    │       │         RETRIEVAL PIPELINE        │
 │   answer cache)          │       │                                   │
-└──────────────────────────┘       │  1. HyDE query expansion          │
+└──────────────────────────┘       │  1. HyDE Query Expansion (Rewrite)│
                                    │  2. FAISS child chunk search k=10 │
                                    │  3. BM25 keyword search      k=10 │
                                    │  4. Summary vector search    k=3  │
                                    │  5. RRF fusion            → top-12│
                                    │  6. Cross-encoder reranking → top-5│
+                                   │       (Relevance Gate blocks < -9)│
                                    │  7. Parent section expansion      │
                                    │  8. Deduplicate parents           │
                                    └─────────────────┬─────────────────┘
@@ -162,17 +165,16 @@ Every query goes through 8 stages:
 ```
 User Question
       │
-      ▼ [1] HyDE — Hypothetical Document Embedding
-      │    LLM generates a plausible answer to the question.
-      │    This synthetic answer embeds better than the raw question,
-      │    improving semantic recall. Skipped when using Ollama
-      │    (too slow on CPU without GPU).
+      ▼ [1] HyDE Query Expansion (Rewriter)
+      │    LLM rewrites the user question into an optimized keyword string,
+      │    resolving abbreviations (edu -> education) and dropping filler.
+      │    Skipped when using Ollama (too slow on CPU without GPU).
       │
       ▼ [2] FAISS Semantic Search  (child chunks, k=10 or k=15 for comprehensive)
-      │    All-MiniLM-L6-v2 embeddings, L2 distance
+      │    Embeds the *expanded* query via All-MiniLM-L6-v2 to find semantic matches
       │
       ▼ [3] BM25 Keyword Search    (child chunks, k=10 or k=15)
-      │    Exact keyword matching via rank-bm25
+      │    Exact keyword matching using the *expanded* query via rank-bm25
       │
       ▼ [4] Summary Vector Search  (cached doc summaries, k=3)
       │    Searches document-level summaries — helps surface the right
@@ -184,8 +186,9 @@ User Question
       │
       ▼ [6] Cross-Encoder Reranking  (top-5 or top-8)
       │    cross-encoder/ms-marco-MiniLM-L-6-v2 (~22 MB) scores each
-      │    query-chunk pair directly — much more accurate than cosine
-      │    similarity alone. Runs on CPU in ~100-200ms.
+      │    expanded-query/chunk pair directly. Runs on CPU in ~100-200ms.
+      │    RELEVANCE GATE: If the best score is < -9.0, the pipeline
+      │    short-circuits and refuses the off-topic query.
       │
       ▼ [7] Parent Section Expansion
       │    For each top child chunk: load its parent section from disk.
